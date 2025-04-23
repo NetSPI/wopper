@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://i.imgur.com/Zr41qXZ.png" width="100%"></img>
+  <img src="https://i.imgur.com/HNyLucC.png" width="100%"></img>
 </div>
 
 WordPress Privilege Escalation Rapidly  
