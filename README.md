@@ -9,6 +9,8 @@ Automatically upload, execute, and delete PHP files on WordPress with a single c
 Speed++. Stealth++. Shell WordPress in mere seconds with wopper!  
 wopper also makes a great skeleton for other web exploits. Feel free to modify the curl calls and use it as a template for other projects!  
   
+Read the article [here](https://www.netspi.com/blog/technical-blog/web-application-pentesting/getting-shells-at-terminal-velocity-with-wopper).
+  
 <b>Installation:</b>  
 pup is used for HTML processing.  
 <code>sudo apt-get install pup</code>  
